@@ -1,0 +1,6 @@
+{
+  "name": "Hotel Booking Assistant",
+  "description": "A high-end, AI-powered hotel receptionist and booking assistant that conducts deep search grounding about any hotel in the world to serve guests with luxury boutique service.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

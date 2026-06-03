@@ -1,0 +1,43 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Outfit', sans-serif;
+  --font-serif: 'Playfair Display', serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  
+  --color-gold-50: #fbf7ee;
+  --color-gold-100: #f6ebd3;
+  --color-gold-500: #c5a880;
+  --color-gold-600: #b08d5b;
+  --color-gold-700: #937343;
+  --color-navy-900: #121a24;
+  --color-navy-950: #0a0f16;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #fcfbfa;
+  color: #2b2825;
+}
+
+/* Custom gorgeous scrollbar for clean luxury containers */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(197, 168, 128, 0.2);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(197, 168, 128, 0.5);
+}
+
+.font-serif-elegant {
+  font-family: var(--font-serif);
+}
+
