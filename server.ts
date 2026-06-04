@@ -7,7 +7,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;
 
 app.use(express.json());
 
@@ -88,28 +88,18 @@ app.post("/api/hotel/setup", async (req, res) => {
   try {
     console.log(`Analyzing hotel request: "${hotelQuery}"`);
 
-    // Step 1: Perform search grounding to gather real information about the hotel
-    const searchResponse = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: `Search Google for the following hotel based in Nigeria and gather extensive details on it: "${hotelQuery}". 
-Provide general information, its verified full name, exact location in Nigeria, physical look and style, standout amenities (e.g. pools, dining, fitness, spa), room types with estimated pricing bounds in Naira (₦), house rules/policies, and public contact information. Ensure it sounds simple, clean, and clear.`,
-      config: {
-        tools: [{ googleSearch: {} }],
-      },
-    });
-
-    const researchContext = searchResponse.text;
-    console.log("Research gathered, parsing to structured details...");
-
-    // Step 2: Use another fast call to parse that text safely into our strict JSON model
+    // We use a single call with Structured Outputs. 
+    // This perfectly handles both "Short Name" lookups (from memory) AND "Long Manual Copy-Paste" inputs.
     const parseResponse = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: `You are an expert hospitality data scraper. Parse the following research data and format it precisely into the requested JSON schema.
-      
-Research Data:
-${researchContext}
+      model: "gemini-2.5-flash",
+      contents: `You are an expert hospitality data scraper and clerk. 
+The user has provided input to source a hotel. It might be just a short name (e.g. "Transcorp Hilton"), or it might be a full manual list of details they copy-pasted (Name, Location, Style, Amenities, Rooms, Policies, Contact, etc.).
 
-Requested Hotel: "${hotelQuery}"`,
+If it's just a short name, use your memory to generate a highly detailed, realistic profile for it.
+If the user provided a detailed list or paragraph, extract those exact details and structure them perfectly into the requested format. Do not hallucinate if they provided the facts.
+
+User Input:
+"${hotelQuery}"`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -191,7 +181,7 @@ app.post("/api/hotel/chat", async (req, res) => {
 Your Personality:
 - Human and welcoming: Use simple, clean, and clear English. Avoid sounding like an AI robot or being overly formal/stiff.
 - Professional but approachable: Be polite, accommodating, and helpful.
-- Emojis: Use emojis softly and tastefully to make the conversation feel friendly, but don't overdo it.
+- Emojis: Use emojis frequently and expressively to make the conversation feel lively, warm, and highly engaging (but don't make it look like spam).
 
 Hotel Facts:
 - Name: ${hotelProfile.name}
@@ -218,6 +208,15 @@ Rules of Conversation:
         parts: [{ text: msg.text }]
       });
     }
+
+    // FIX: The Gemini API strictly requires that the conversation history starts with a 'user' role.
+    // Because your frontend initializes the chat with a 'model' welcome message, the API was 
+    // rejecting the request with a 400 Bad Request error. Your catch block interpreted this 
+    // as a rate limit. We fix this by removing any leading 'model' messages.
+    while (contentsPayload.length > 0 && contentsPayload[0].role === 'model') {
+      contentsPayload.shift();
+    }
+
     // Append current message
     contentsPayload.push({
       role: 'user',
@@ -226,7 +225,7 @@ Rules of Conversation:
 
     console.log("Sending message history to hotel receptionist AI...");
     const chatResponse = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: contentsPayload,
       config: {
         systemInstruction,
@@ -353,7 +352,10 @@ async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     console.log("Server starting in DEVELOPMENT mode...");
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { 
+        middlewareMode: true,
+        hmr: { port: 24679 }
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);

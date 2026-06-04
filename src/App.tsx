@@ -111,14 +111,36 @@ export default function App() {
     {
       id: 'welcome',
       role: 'model',
-      text: `Hello! 👋 Welcome to ${DEFAULT_HOTEL.name}. I'm here to help you check room rates, answer questions about our amenities, or book a stay for you. How can I help you today? ✨`,
+      text: `Hello! 👋 Welcome to ${DEFAULT_HOTEL.name}.\nI'm here to help with bookings, availability, pricing and anything about your stay.\nHow can I assist you today? ✨`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     }
   ]);
   const [inputMessage, setInputMessage] = useState('');
   const [isMessaging, setIsMessaging] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
   
   const chatBottomRef = useRef<HTMLDivElement>(null);
+
+  // Generate a shareable guest link by encoding the hotel profile + theme into the URL hash
+  const generateGuestLink = (copy: boolean) => {
+    const payload = JSON.stringify({
+      ...hotelProfile,
+      roomTypes,
+      amenities: editableAmenities,
+      customNotes
+    });
+    const encoded = btoa(encodeURIComponent(payload));
+    const themeEncoded = btoa(encodeURIComponent(selectedTheme.gradient));
+    const base = `${window.location.origin}${window.location.pathname}`;
+    const guestUrl = `${base}#/guest?d=${encoded}&t=${themeEncoded}`;
+    if (copy) {
+      navigator.clipboard.writeText(guestUrl).then(() => {
+        setLinkCopied(true);
+        setTimeout(() => setLinkCopied(false), 2500);
+      });
+    }
+    return guestUrl;
+  };
 
   // Sync edits to profile
   useEffect(() => {
@@ -177,7 +199,7 @@ export default function App() {
           {
             id: 'system-setup',
             role: 'model',
-            text: `Hello! 👋 Welcome to ${profile.name} located in ${profile.location}. I've successfully learnt all about our hotel and I'm ready to help you book a stay or answer your questions. What do you need help with? ✨`,
+            text: `Hello! 👋 Welcome to ${profile.name}.\nI'm here to help with bookings, availability, pricing and anything about your stay.\nHow can I assist you today? ✨`,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           }
         ]);
@@ -316,14 +338,40 @@ export default function App() {
             </div>
           </div>
           
-          {/* Active status or Quick Sourcing */}
-          <div className="flex items-center gap-4 w-full md:w-auto justify-end" id="header-actions">
-            <div className="flex items-center gap-2 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-100 px-3 py-1.5 rounded-full shadow-xs" id="status-badge">
-              <span className="relative flex h-2 w-2" id="live-ping-dot">
+          {/* Header Actions: Guest Link Generator */}
+          <div className="flex items-center gap-2.5 w-full md:w-auto justify-end" id="header-actions">
+            {/* Preview Guest View */}
+            <button
+              onClick={() => window.open(generateGuestLink(false), '_blank')}
+              className="text-xs font-semibold text-stone-700 bg-white border border-stone-200 hover:bg-stone-50 px-4 py-2 rounded-full transition-all shadow-xs flex items-center gap-1.5"
+              id="preview-guest-btn"
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+              Preview Guest View
+            </button>
+            {/* Copy Guest Link */}
+            <button
+              onClick={() => generateGuestLink(true)}
+              className={`text-xs font-semibold px-4 py-2 rounded-full transition-all shadow-sm flex items-center gap-1.5 ${
+                linkCopied
+                  ? 'bg-emerald-600 text-white border border-emerald-700'
+                  : 'bg-stone-900 text-white hover:bg-stone-800 border border-stone-950'
+              }`}
+              id="copy-link-btn"
+            >
+              {linkCopied ? (
+                <><Check className="h-3.5 w-3.5" /> Link Copied!</>
+              ) : (
+                <><ArrowRight className="h-3.5 w-3.5" /> Copy Guest Link</>
+              )}
+            </button>
+            {/* AI Engine Status */}
+            <div className="hidden lg:flex items-center gap-2 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-100 px-3 py-1.5 rounded-full shadow-xs" id="status-badge">
+              <span className="relative flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
               </span>
-              Google Search Grounding Connected
+              AI Engine Online
             </div>
           </div>
         </div>
