@@ -11,6 +11,26 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3005;
 
 app.use(express.json());
 
+// In-memory store for short guest links
+const sharedLinks = new Map<string, any>();
+
+app.post("/api/hotel/share", (req, res) => {
+  const data = req.body;
+  // Generate a random 6 character ID like X7K2PQ
+  const id = Math.random().toString(36).substring(2, 8).toUpperCase();
+  sharedLinks.set(id, data);
+  res.json({ id });
+});
+
+app.get("/api/hotel/share/:id", (req, res) => {
+  const data = sharedLinks.get(req.params.id.toUpperCase());
+  if (data) {
+    res.json(data);
+  } else {
+    res.status(404).json({ error: "Link expired or invalid" });
+  }
+});
+
 // Initialize Gemini SDK with User-Agent telemetry
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,

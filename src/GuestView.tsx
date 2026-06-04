@@ -3,24 +3,6 @@ import { Hotel, Send, CheckCircle2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { HotelProfile, Booking, ChatMessage } from './types';
 
-// Decode and validate the hotel profile from the URL ?d= param
-function decodeProfile(encoded: string): HotelProfile | null {
-  try {
-    const json = decodeURIComponent(atob(encoded));
-    return JSON.parse(json) as HotelProfile;
-  } catch {
-    return null;
-  }
-}
-
-// Decode the theme gradient stored in the URL
-function decodeTheme(encoded: string): string {
-  try {
-    return decodeURIComponent(atob(encoded));
-  } catch {
-    return 'from-[#b08d5b] to-[#c5a880]';
-  }
-}
 
 export default function GuestView() {
   const [hotelProfile, setHotelProfile] = useState<HotelProfile | null>(null);
@@ -33,28 +15,40 @@ export default function GuestView() {
   const [bookingsList, setBookingsList] = useState<Booking[]>([]);
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
-  // Parse profile from URL on mount
+  // Fetch profile from server using ID from URL
   useEffect(() => {
-    const hash = window.location.hash; // e.g. #/guest?d=xxx&t=yyy
-    const queryStr = hash.includes('?') ? hash.split('?')[1] : '';
-    const params = new URLSearchParams(queryStr);
-    const d = params.get('d');
-    const t = params.get('t');
+    const fetchSharedProfile = async () => {
+      // URL looks like: #/guest/X7K2PQ
+      const hash = window.location.hash;
+      const id = hash.split('/').pop();
+      
+      if (!id || id === 'guest') {
+        setInvalid(true);
+        return;
+      }
 
-    if (!d) { setInvalid(true); return; }
+      try {
+        const res = await fetch(`/api/hotel/share/${id}`);
+        if (!res.ok) {
+          setInvalid(true);
+          return;
+        }
+        const data = await res.json();
+        setHotelProfile(data.profile);
+        if (data.theme) setThemeGradient(data.theme);
 
-    const profile = decodeProfile(d);
-    if (!profile) { setInvalid(true); return; }
+        setChatMessages([{
+          id: 'welcome',
+          role: 'model',
+          text: `Hello! 👋 Welcome to ${data.profile.name}.\nI'm here to help with bookings, availability, pricing and anything about your stay.\nHow can I assist you today? ✨`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }]);
+      } catch (err) {
+        setInvalid(true);
+      }
+    };
 
-    setHotelProfile(profile);
-    if (t) setThemeGradient(decodeTheme(t));
-
-    setChatMessages([{
-      id: 'welcome',
-      role: 'model',
-      text: `Hello! 👋 Welcome to ${profile.name}.\nI'm here to help with bookings, availability, pricing and anything about your stay.\nHow can I assist you today? ✨`,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    }]);
+    fetchSharedProfile();
   }, []);
 
   // Auto-scroll

@@ -121,25 +121,45 @@ export default function App() {
   
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
-  // Generate a shareable guest link by encoding the hotel profile + theme into the URL hash
-  const generateGuestLink = (copy: boolean) => {
-    const payload = JSON.stringify({
-      ...hotelProfile,
-      roomTypes,
-      amenities: editableAmenities,
-      customNotes
-    });
-    const encoded = btoa(encodeURIComponent(payload));
-    const themeEncoded = btoa(encodeURIComponent(selectedTheme.gradient));
-    const base = `${window.location.origin}${window.location.pathname}`;
-    const guestUrl = `${base}#/guest?d=${encoded}&t=${themeEncoded}`;
-    if (copy) {
-      navigator.clipboard.writeText(guestUrl).then(() => {
+  const [isGeneratingLink, setIsGeneratingLink] = useState(false);
+
+  // Generate a short shareable guest link by saving to the server's memory
+  const generateGuestLink = async (action: 'copy' | 'preview') => {
+    setIsGeneratingLink(true);
+    try {
+      const payload = {
+        profile: {
+          ...hotelProfile,
+          roomTypes,
+          amenities: editableAmenities,
+          customNotes
+        },
+        theme: selectedTheme.gradient
+      };
+
+      const response = await fetch('/api/hotel/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      
+      const base = `${window.location.origin}${window.location.pathname}`;
+      const guestUrl = `${base}#/guest/${data.id}`;
+
+      if (action === 'copy') {
+        await navigator.clipboard.writeText(guestUrl);
         setLinkCopied(true);
         setTimeout(() => setLinkCopied(false), 2500);
-      });
+      } else if (action === 'preview') {
+        window.open(guestUrl, '_blank');
+      }
+    } catch (e) {
+      console.error("Failed to generate link", e);
+      alert("Failed to generate link. Check server connection.");
+    } finally {
+      setIsGeneratingLink(false);
     }
-    return guestUrl;
   };
 
   // Sync edits to profile
@@ -342,8 +362,9 @@ export default function App() {
           <div className="flex items-center gap-2.5 w-full md:w-auto justify-end" id="header-actions">
             {/* Preview Guest View */}
             <button
-              onClick={() => window.open(generateGuestLink(false), '_blank')}
-              className="text-xs font-semibold text-stone-700 bg-white border border-stone-200 hover:bg-stone-50 px-4 py-2 rounded-full transition-all shadow-xs flex items-center gap-1.5"
+              onClick={() => generateGuestLink('preview')}
+              disabled={isGeneratingLink}
+              className="text-xs font-semibold text-stone-700 bg-white border border-stone-200 hover:bg-stone-50 px-4 py-2 rounded-full transition-all shadow-xs flex items-center gap-1.5 disabled:opacity-50"
               id="preview-guest-btn"
             >
               <ChevronRight className="h-3.5 w-3.5" />
@@ -351,8 +372,9 @@ export default function App() {
             </button>
             {/* Copy Guest Link */}
             <button
-              onClick={() => generateGuestLink(true)}
-              className={`text-xs font-semibold px-4 py-2 rounded-full transition-all shadow-sm flex items-center gap-1.5 ${
+              onClick={() => generateGuestLink('copy')}
+              disabled={isGeneratingLink}
+              className={`text-xs font-semibold px-4 py-2 rounded-full transition-all shadow-sm flex items-center gap-1.5 disabled:opacity-50 ${
                 linkCopied
                   ? 'bg-emerald-600 text-white border border-emerald-700'
                   : 'bg-stone-900 text-white hover:bg-stone-800 border border-stone-950'
@@ -361,6 +383,8 @@ export default function App() {
             >
               {linkCopied ? (
                 <><Check className="h-3.5 w-3.5" /> Link Copied!</>
+              ) : isGeneratingLink ? (
+                <span className="h-3.5 w-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
               ) : (
                 <><ArrowRight className="h-3.5 w-3.5" /> Copy Guest Link</>
               )}
