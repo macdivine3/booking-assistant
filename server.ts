@@ -197,6 +197,7 @@ app.post("/api/hotel/chat", async (req, res) => {
     }
 
     const systemInstruction = `You are a warm, highly-capable human concierge for ${hotelProfile.name} located in ${hotelProfile.location}.
+Today's Date: ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
 
 Hotel Knowledge Base:
 - Description: ${hotelProfile.description}
