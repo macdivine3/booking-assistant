@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -31,71 +31,53 @@ app.get("/api/hotel/share/:id", (req, res) => {
   }
 });
 
-// Initialize Gemini SDK with User-Agent telemetry
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    }
-  }
-});
+// Claude client — reads ANTHROPIC_API_KEY from the environment (.env)
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// Beautiful high-fidelity procedural template generator used as a fallback if client API quota limits are exhausted
-function generateProceduralHotel(query: string): any {
-  let name = query.trim();
-  // If user pasted a URL, use a luxury placeholder name
-  if (name.startsWith('http')) {
-    name = "The Royal Estate Hotel";
-  } else {
-    // Capitalize nicely
-    name = name.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
-  }
-  
-  let guessedCity = "Victoria Island, Lagos, Nigeria";
-  const lowerQuery = query.toLowerCase();
-  
-  if (lowerQuery.includes("abuja")) guessedCity = "Maitama, Abuja, Nigeria";
-  else if (lowerQuery.includes("port harcourt") || lowerQuery.includes("phc")) guessedCity = "GRA Phase 2, Port Harcourt, Nigeria";
-  else if (lowerQuery.includes("ikeja")) guessedCity = "Ikeja, Lagos, Nigeria";
-  else if (lowerQuery.includes("enugu")) guessedCity = "Independence Layout, Enugu, Nigeria";
-  else if (lowerQuery.includes("ibadan")) guessedCity = "Bodija, Ibadan, Nigeria";
-  else if (lowerQuery.includes("kano")) guessedCity = "Nasarawa GRA, Kano, Nigeria";
-  else if (lowerQuery.includes("uyo")) guessedCity = "Ewet Housing Estate, Uyo, Nigeria";
-  else if (lowerQuery.includes("calabar")) guessedCity = "State Housing Estate, Calabar, Nigeria";
+const MODEL = "claude-opus-4-8";
 
-  return {
-    name: name,
-    location: guessedCity,
-    description: `Welcome to ${name}. Located right in the beautiful city of ${guessedCity}, we offer a perfect blend of luxury and comfort. Our estate provides a relaxing escape with premium dining, wonderful service, and peaceful aesthetics for all our guests.`,
-    amenities: [
-      "Outdoor Swimming Pool",
-      "Premium Restaurant & Lounge",
-      "24/7 Secure Power & Security",
-      "Luxury Spa & Wellness Center",
-      "Free High-Speed Wi-Fi",
-      "Airport Pickup Protocol"
-    ],
-    roomTypes: [
-      {
-        name: "Standard Luxury Room",
-        description: "A comfortable and elegant room with a king-size bed, work desk, and a modern en-suite bathroom.",
-        priceEstimate: "₦200,000 per night"
+// JSON Schema describing the HotelProfile shape the frontend expects.
+const HOTEL_PROFILE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    name: { type: "string", description: "Official name of the hotel" },
+    location: { type: "string", description: "Detailed physical address, city, and state/country" },
+    description: {
+      type: "string",
+      description: "An engaging, premium-tier description focusing on atmosphere and service",
+    },
+    amenities: {
+      type: "array",
+      items: { type: "string" },
+      description: "Key guest amenities (e.g., Rooftop Pool, Full-service Spa, Free Wi-Fi)",
+    },
+    roomTypes: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: { type: "string", description: "e.g. Classic Deluxe King, Ocean Vista Suite" },
+          description: { type: "string", description: "Bedding, view, and key room highlights" },
+          priceEstimate: { type: "string", description: "e.g. '$250/night' or '₦200,000 per night'" },
+        },
+        required: ["name", "description", "priceEstimate"],
       },
-      {
-        name: "Executive Suite",
-        description: "Spacious living area with premium decor, complimentary breakfast, and amazing city views.",
-        priceEstimate: "₦350,000 per night"
-      },
-      {
-        name: "Royal Presidential Suite",
-        description: "The peak of luxury living. Features a private lounge, 24/7 butler service, and exquisite VIP styling.",
-        priceEstimate: "₦700,000 per night"
-      }
-    ],
-    policies: "Check-in from 3:00 PM. Check-out up to 12:00 PM. In-room fine dining is accessible 24 hours. Pet-friendly coordinates can be customized upon request.",
-    contactInfo: "+1 800-CONTACT-AURA / desk@demo-aura-hotel.com"
-  };
+    },
+    policies: { type: "string", description: "Check-in / check-out times, cancellation, children/pets" },
+    contactInfo: { type: "string", description: "General inquiry phone number or public email" },
+  },
+  required: ["name", "location", "description", "amenities", "roomTypes", "policies", "contactInfo"],
+} as const;
+
+// Pull the plain text out of a Claude message response.
+function extractText(content: any[]): string {
+  return content
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n")
+    .trim();
 }
 
 // Primary Server-side endpoints
@@ -106,98 +88,135 @@ app.post("/api/hotel/setup", async (req, res) => {
   }
 
   try {
-    console.log(`Analyzing hotel request: "${hotelQuery}"`);
+    console.log(`Researching hotel: "${hotelQuery}"`);
 
-    // We use a single call with Structured Outputs. 
-    // This perfectly handles both "Short Name" lookups (from memory) AND "Long Manual Copy-Paste" inputs.
-    const parseResponse = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: `You are an expert hospitality data scraper and clerk. 
-The user has provided input to source a hotel. It might be just a short name (e.g. "Transcorp Hilton"), or it might be a full manual list of details they copy-pasted (Name, Location, Style, Amenities, Rooms, Policies, Contact, etc.).
+    // --- Step 1: Research the real hotel using web search ---
+    const researchMessages: Anthropic.MessageParam[] = [
+      {
+        role: "user",
+        content: `Research this hotel and gather everything a receptionist would need to answer guest questions and take bookings: official name, full location/address, an appealing description, key amenities, the room types with a short description and nightly price for each, booking/cancellation and check-in/check-out policies, and public contact info.
 
-If it's just a short name, use your memory to generate a highly detailed, realistic profile for it.
-If the user provided a detailed list or paragraph, extract those exact details and structure them perfectly into the requested format. Do not hallucinate if they provided the facts.
+The input may be a short hotel name, or a full block of details the owner pasted in. If it's a name, search the web for the real, current details. If they pasted details, use those exact facts and only search to fill gaps. Where a specific figure (like exact room rates) isn't published, give a reasonable local-market estimate rather than leaving it blank.
 
-User Input:
-"${hotelQuery}"`,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            name: { type: Type.STRING, description: "Official name of the hotel" },
-            location: { type: Type.STRING, description: "Detailed physical address, city, and state/country" },
-            description: { type: Type.STRING, description: "An engaging, premium-tier, elite hotel description focusing on details, atmosphere, and service" },
-            amenities: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "List of key guest amenities (e.g., Rooftop Pool, Michelin Star Dining, Full-service Spa)"
-            },
-            roomTypes: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  name: { type: Type.STRING, description: "Classic Deluxe King, Ocean Vista Suite, etc." },
-                  description: { type: Type.STRING, description: "Size, bedding configurations, view description and key room-specific highlights" },
-                  priceEstimate: { type: Type.STRING, description: "Estimated price formatting like '$250/night' or '$400 - $600 per night'" }
-                },
-                required: ["name", "description", "priceEstimate"]
-              }
-            },
-            policies: { type: Type.STRING, description: "Check-in time (e.g. 3:00 PM), Check-out time (e.g. 11:00 AM), cancellation, children or pets" },
-            contactInfo: { type: Type.STRING, description: "General inquiry phone number or public email" }
-          },
-          required: ["name", "location", "description", "amenities", "roomTypes", "policies", "contactInfo"]
-        }
-      }
+Hotel: "${hotelQuery}"
+
+Write up what you found as clear notes.`,
+      },
+    ];
+
+    let research = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 4000,
+      tools: [{ type: "web_search_20260209", name: "web_search" }],
+      messages: researchMessages,
     });
 
-    const profileDataStr = parseResponse.text;
-    if (!profileDataStr) {
-      throw new Error("Empty details response returned from Gemini");
+    // Web search runs a server-side loop; resume on pause_turn until it settles.
+    let guard = 0;
+    while (research.stop_reason === "pause_turn" && guard++ < 5) {
+      researchMessages.push({ role: "assistant", content: research.content });
+      research = await anthropic.messages.create({
+        model: MODEL,
+        max_tokens: 4000,
+        tools: [{ type: "web_search_20260209", name: "web_search" }],
+        messages: researchMessages,
+      });
     }
 
-    const hotelProfile = JSON.parse(profileDataStr);
-    return res.json({ profile: hotelProfile });
+    const researchNotes = extractText(research.content);
 
-  } catch (err: any) {
-    console.log("Direct scanning rate limited. Assembling high-fidelity fallback model procedurally.");
-    
-    const fallbackProfile = generateProceduralHotel(hotelQuery);
-    return res.json({ 
-      profile: fallbackProfile
+    // --- Step 2: Structure the notes into the exact HotelProfile shape ---
+    const structured = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 2000,
+      output_config: { format: { type: "json_schema", schema: HOTEL_PROFILE_SCHEMA } },
+      messages: [
+        {
+          role: "user",
+          content: `Turn these hotel research notes into the structured profile. Keep facts accurate; only estimate where a detail is genuinely missing.\n\nNotes:\n${researchNotes}`,
+        },
+      ],
     });
+
+    const hotelProfile = JSON.parse(extractText(structured.content));
+    return res.json({ profile: hotelProfile });
+  } catch (err: any) {
+    console.error("Hotel setup failed:", err?.message || err);
+    return res.status(500).json({ error: "Could not build the hotel profile. Please try again." });
   }
 });
 
-// Book room function registration for semantic triggers during chat
-const bookRoomTool: FunctionDeclaration = {
+// bookRoom tool — Claude calls this once it has gathered the booking details.
+const bookRoomTool: Anthropic.Tool = {
   name: "bookRoom",
-  description: "Initiate or request a booking/reservation for a room type.",
-  parameters: {
-    type: Type.OBJECT,
+  description:
+    "Confirm a room booking/reservation once the guest has provided their name, room preference, check-in date, and number of nights.",
+  input_schema: {
+    type: "object",
     properties: {
-      roomType: { type: Type.STRING, description: "The type of suite or room the guest selected." },
-      guestName: { type: Type.STRING, description: "The guest's full name." },
-      checkInDate: { type: Type.STRING, description: "Arrival check-in date or descriptive timeline." },
-      nights: { type: Type.NUMBER, description: "The total number of nights requested." },
-      specialRequests: { type: Type.STRING, description: "Any custom request (e.g., late check-out, crib, extra pillows)." }
+      roomType: { type: "string", description: "The suite or room the guest selected." },
+      guestName: { type: "string", description: "The guest's full name." },
+      checkInDate: { type: "string", description: "Arrival check-in date or descriptive timeline." },
+      nights: { type: "number", description: "The total number of nights requested." },
+      specialRequests: { type: "string", description: "Any custom request (late check-out, crib, etc.)." },
     },
-    required: ["roomType", "guestName", "checkInDate", "nights"]
-  }
+    required: ["roomType", "guestName", "checkInDate", "nights"],
+  },
 };
+
+// Build the Booking object the frontend renders, keeping the original price logic.
+function buildBooking(args: any, hotelProfile: any) {
+  const nightsCount = Number(args.nights) || 1;
+
+  let baseRate = 250000;
+  const profileRateStr = hotelProfile.roomTypes?.[0]?.priceEstimate?.replace(/,/g, "") || "";
+  const argRateStr = args.roomType ? String(args.roomType).replace(/,/g, "") : "";
+
+  const matchedRate = argRateStr.match(/\d+/);
+  if (matchedRate && parseInt(matchedRate[0], 10) > 1000) {
+    baseRate = parseInt(matchedRate[0], 10);
+  } else {
+    const profileRate = profileRateStr.match(/\d+/);
+    if (profileRate && parseInt(profileRate[0], 10) > 1000) baseRate = parseInt(profileRate[0], 10);
+  }
+
+  const totalNumeric = baseRate * nightsCount;
+  const formattedTotal = totalNumeric
+    .toLocaleString("en-NG", { style: "currency", currency: "NGN" })
+    .replace("NGN", "₦");
+
+  return {
+    id: `RES-${Math.floor(100000 + Math.random() * 900000)}`,
+    hotelName: hotelProfile.name,
+    roomType: args.roomType || "Standard Room",
+    guestName: args.guestName || "Guest",
+    checkInDate: args.checkInDate || "Upcoming Date",
+    nights: nightsCount,
+    totalPrice: formattedTotal,
+    specialRequests: args.specialRequests || "",
+    status: "confirmed",
+  };
+}
 
 app.post("/api/hotel/chat", async (req, res) => {
   try {
     const { hotelProfile, messages, currentMessage } = req.body;
 
     if (!hotelProfile || !messages || !currentMessage) {
-      return res.status(400).json({ error: "Missing required properties: hotelProfile, messages, or currentMessage" });
+      return res
+        .status(400)
+        .json({ error: "Missing required properties: hotelProfile, messages, or currentMessage" });
     }
 
+    const today = new Date().toLocaleDateString("en-US", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+
     const systemInstruction = `You are a warm, highly-capable human concierge for ${hotelProfile.name} located in ${hotelProfile.location}.
-Today's Date: ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+Today's Date: ${today}
 
 Hotel Knowledge Base:
 - Description: ${hotelProfile.description}
@@ -208,157 +227,81 @@ ${hotelProfile.roomTypes.map((r: any) => `  * ${r.name}: ${r.description} (Price
 - Contact: ${hotelProfile.contactInfo}
 ${hotelProfile.customNotes ? `- Custom Staff Notes: ${hotelProfile.customNotes}` : ""}
 
-How to Behave (CRITICAL):
-- Act like a real, chill, and welcoming human being. Use emojis expressively to keep the vibe warm.
-- The hotel data above is your core knowledge, but you are absolutely free to make small talk, discuss the city, or answer general travel questions. Do not act like a robot stuck on a script.
-- DO NOT push for a booking aggressively. Only help them book if they explicitly express interest in staying.
-- If they want to book, gently collect their Name, room preference, check-in date, and nights *casually over the course of the conversation*. Do not bombard them with a massive form or ask for everything at once unless it flows naturally.
-- Once you naturally have those 4 details, execute the "bookRoom" tool to confirm.`;
+How to behave:
+- Chat like a real, warm human being. Use emojis naturally to keep the vibe friendly.
+- The hotel data above is your core knowledge, but you can make small talk, discuss the city, and answer general travel questions. Don't sound like a script.
+- Don't push for a booking. Only help them book if they clearly want to stay.
+- If they want to book, casually gather their name, room preference, check-in date, and number of nights over the course of the conversation — don't dump a big form on them.
+- Once you naturally have those four details, call the "bookRoom" tool to confirm, then reply warmly.`;
 
-    // Construct history array format
-    const contentsPayload = [];
+    // Build Claude-format history. Frontend uses role 'model' for the assistant.
+    const claudeMessages: Anthropic.MessageParam[] = [];
     for (const msg of messages) {
-      contentsPayload.push({
-        role: msg.role === 'model' ? 'model' : 'user',
-        parts: [{ text: msg.text }]
+      claudeMessages.push({
+        role: msg.role === "model" ? "assistant" : "user",
+        content: msg.text,
       });
     }
-
-    // FIX: The Gemini API strictly requires that the conversation history starts with a 'user' role.
-    // Because your frontend initializes the chat with a 'model' welcome message, the API was 
-    // rejecting the request with a 400 Bad Request error. Your catch block interpreted this 
-    // as a rate limit. We fix this by removing any leading 'model' messages.
-    while (contentsPayload.length > 0 && contentsPayload[0].role === 'model') {
-      contentsPayload.shift();
+    // Claude requires the conversation to start with a user turn — drop leading assistant messages.
+    while (claudeMessages.length > 0 && claudeMessages[0].role === "assistant") {
+      claudeMessages.shift();
     }
-
-    // Append current message
-    contentsPayload.push({
-      role: 'user',
-      parts: [{ text: currentMessage }]
-    });
+    claudeMessages.push({ role: "user", content: currentMessage });
 
     console.log("Sending message history to hotel receptionist AI...");
-    const chatResponse = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: contentsPayload,
-      config: {
-        systemInstruction,
-        tools: [{ functionDeclarations: [bookRoomTool] }],
-        temperature: 0.7,
-      }
+
+    let response = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 1024,
+      system: systemInstruction,
+      tools: [bookRoomTool],
+      messages: claudeMessages,
     });
 
-    const responseText = chatResponse.text || "I apologize, let me double check that for you.";
-    const functionCalls = chatResponse.functionCalls;
+    let triggeredBooking: any = null;
 
-    let triggeredBooking = null;
+    // If Claude calls bookRoom, run it, feed the result back, and get the final reply.
+    if (response.stop_reason === "tool_use") {
+      const toolUse = response.content.find(
+        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === "bookRoom"
+      );
 
-    if (functionCalls && functionCalls.length > 0) {
-      const call = functionCalls[0];
-      if (call.name === "bookRoom") {
-        const args: any = call.args;
-        console.log("Room booking triggered via function call:", args);
+      if (toolUse) {
+        console.log("Room booking triggered via tool call:", toolUse.input);
+        triggeredBooking = buildBooking(toolUse.input, hotelProfile);
 
-        const nightsCount = Number(args.nights) || 1;
-        // Attempt to estimate total price based on text. Pick a default if numeric extraction fails.
-        let baseRate = 250000;
-        // Strip commas for accurate matching on prices like 250,000
-        const profileRateStr = hotelProfile.roomTypes?.[0]?.priceEstimate?.replace(/,/g, '') || "";
-        const argRateStr = args.roomType ? String(args.roomType).replace(/,/g, '') : "";
-        
-        const matchedRate = argRateStr.match(/\d+/);
-        if (matchedRate && parseInt(matchedRate[0], 10) > 1000) {
-          baseRate = parseInt(matchedRate[0], 10);
-        } else {
-          const profileRate = profileRateStr.match(/\d+/);
-          if (profileRate && parseInt(profileRate[0], 10) > 1000) baseRate = parseInt(profileRate[0], 10);
-        }
+        claudeMessages.push({ role: "assistant", content: response.content });
+        claudeMessages.push({
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: toolUse.id,
+              content: `Booking confirmed. Reservation ID ${triggeredBooking.id} for ${triggeredBooking.roomType}, ${triggeredBooking.nights} night(s), total ${triggeredBooking.totalPrice}. Warmly confirm this to the guest.`,
+            },
+          ],
+        });
 
-        const totalNumeric = baseRate * nightsCount;
-        const formattedTotal = totalNumeric.toLocaleString('en-NG', { style: 'currency', currency: 'NGN' }).replace('NGN', '₦');
-
-        triggeredBooking = {
-          id: `RES-${Math.floor(100000 + Math.random() * 900000)}`,
-          hotelName: hotelProfile.name,
-          roomType: args.roomType || "Standard Room",
-          guestName: args.guestName || "Guest",
-          checkInDate: args.checkInDate || "Upcoming Date",
-          nights: nightsCount,
-          totalPrice: formattedTotal,
-          specialRequests: args.specialRequests || "",
-          status: 'confirmed'
-        };
+        response = await anthropic.messages.create({
+          model: MODEL,
+          max_tokens: 1024,
+          system: systemInstruction,
+          tools: [bookRoomTool],
+          messages: claudeMessages,
+        });
       }
     }
+
+    const responseText =
+      extractText(response.content) || "I apologize, let me double check that for you.";
 
     return res.json({
       text: responseText,
-      booking: triggeredBooking
+      booking: triggeredBooking,
     });
-
   } catch (err: any) {
-    console.log("Receptionist API rate-limited. Serving intelligent fallback concierge simulation response.");
-    
-    try {
-      const { hotelProfile, currentMessage } = req.body;
-      const lowerInput = currentMessage.toLowerCase();
-      
-      let textResponse = "";
-      let triggeredBooking = null;
-
-      // Smart pattern-based conversational fallback decision tree
-      if (lowerInput.includes("book") || lowerInput.includes("reserve") || lowerInput.includes("stay") || lowerInput.includes("night") || lowerInput.includes("check in")) {
-        // Formulate elegant booking response and trigger booking structure
-        const guestName = "Guest Prospect";
-        const selectedRoom = (hotelProfile.roomTypes && hotelProfile.roomTypes.length > 0) ? hotelProfile.roomTypes[0].name : "Standard Room";
-        const checkIn = "Tomorrow";
-        const nights = 2;
-        
-        let basePrice = 250000;
-        const profileRateStr = hotelProfile.roomTypes?.[0]?.priceEstimate?.replace(/,/g, '') || "";
-        const matchedRate = selectedRoom.replace(/,/g, '').match(/\d+/);
-        
-        if (matchedRate && parseInt(matchedRate[0], 10) > 1000) {
-          basePrice = parseInt(matchedRate[0], 10);
-        } else {
-          const firstRateMatch = profileRateStr.match(/\d+/);
-          if (firstRateMatch && parseInt(firstRateMatch[0], 10) > 1000) basePrice = parseInt(firstRateMatch[0], 10);
-        }
-        
-        const totalNum = basePrice * nights;
-        const totalFmt = totalNum.toLocaleString('en-NG', { style: 'currency', currency: 'NGN' }).replace('NGN', '₦');
-
-        triggeredBooking = {
-          id: `RES-${Math.floor(100000 + Math.random() * 900000)}`,
-          hotelName: hotelProfile.name,
-          roomType: selectedRoom,
-          guestName: guestName,
-          checkInDate: checkIn,
-          nights: nights,
-          totalPrice: totalFmt,
-          specialRequests: "Special VIP Arrival (Simulated Concordance Mode)",
-          status: 'confirmed'
-        };
-
-        textResponse = `I've successfully booked that for you! 🎉 I have reserved the **${selectedRoom}** at **${hotelProfile.name}** for **${guestName}** for **${nights} nights**.\n\nYou should see a confirmation indicator on your dashboard now! Do you have any questions about our dining features or other services? 😊`;
-      } else if (lowerInput.includes("price") || lowerInput.includes("rate") || lowerInput.includes("cost") || lowerInput.includes("room") || lowerInput.includes("suite")) {
-        const roomsText = hotelProfile.roomTypes.map((r: any) => `• **${r.name}** (${r.priceEstimate}): ${r.description}`).join("\n");
-        textResponse = `We have a few lovely rooms available. Here is a quick look at the ones we offer:\n\n${roomsText}\n\nWould you like me to help you book one of these right away? ✨`;
-      } else if (lowerInput.includes("amenit") || lowerInput.includes("pool") || lowerInput.includes("spa") || lowerInput.includes("gym") || lowerInput.includes("dine") || lowerInput.includes("restaurant") || lowerInput.includes("eat")) {
-        const amenitiesText = hotelProfile.amenities.map((a: any) => `• ${a}`).join("\n");
-        textResponse = `At **${hotelProfile.name}**, making sure you have a relaxing time is our goal. Guests get to enjoy these wonderful features during their stay:\n\n${amenitiesText}\n\nCan I provide more details on any of these? 😊`;
-      } else {
-        textResponse = `Hello there! Welcome to the chat for **${hotelProfile.name}** in beautiful **${hotelProfile.location}**! 👋\n\nWe would love to host you and ensure you have a wonderful stay! We offer a range of comfortable suites (starting around ${hotelProfile.roomTypes?.[0]?.priceEstimate || "₦200,000"}).\n\nHow can I help you customize your booking or answer any questions you might have? ✨`;
-      }
-
-      return res.json({
-        text: textResponse,
-        booking: triggeredBooking
-      });
-    } catch (fallbackError) {
-      return res.status(500).json({ error: "Booking assistant fallback failed, please retry." });
-    }
+    console.error("Receptionist chat failed:", err?.message || err);
+    return res.status(500).json({ error: "Booking assistant is temporarily unavailable, please retry." });
   }
 });
 
@@ -367,19 +310,19 @@ async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     console.log("Server starting in DEVELOPMENT mode...");
     const vite = await createViteServer({
-      server: { 
+      server: {
         middlewareMode: true,
-        hmr: { port: 24679 }
+        hmr: { port: 24679 },
       },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
     console.log("Server starting in PRODUCTION mode...");
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
